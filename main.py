@@ -8,20 +8,17 @@ from supabase import create_client, Client
 from dotenv import load_dotenv
 
 # --- 1. CONFIGURAÇÃO INICIAL ---
-# Carrega variáveis de ambiente (localmente usa .env, na nuvem usa as vars do sistema)
 load_dotenv()
 
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-# Validação básica para evitar erros silenciosos
 if not GEMINI_KEY:
     print("⚠️ AVISO: GEMINI_API_KEY não encontrada!")
 if not SUPABASE_URL:
     print("⚠️ AVISO: SUPABASE_URL não encontrada!")
 
-# Configura clientes
 genai.configure(api_key=GEMINI_KEY)
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -32,16 +29,14 @@ except Exception as e:
 # --- 2. DEFINIÇÃO DA APP FASTAPI ---
 app = FastAPI()
 
-# Configura CORS (para seu frontend conseguir acessar)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Em produção, substitua "*" pela URL do seu site
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Modelo de dados recebido do Frontend
 class QuizRequest(BaseModel):
     query: str 
 
@@ -52,7 +47,6 @@ def buscar_contexto(pergunta_usuario):
         return []
         
     try:
-        # Gera embedding (vetor) da pergunta
         embedding = genai.embed_content(
             model="models/gemini-embedding-001",
             content=pergunta_usuario,
@@ -61,7 +55,6 @@ def buscar_contexto(pergunta_usuario):
         )
         vetor_pergunta = embedding['embedding']
         
-        # Busca no Supabase via RPC
         response = supabase.rpc(
             "match_documents",
             {
@@ -89,13 +82,9 @@ def search_lessons_route(request: QuizRequest):
 
 @app.post("/generate-quiz-preview")
 async def generate_quiz_route(request: QuizRequest):
-    """
-    Rota que gera o quiz com IA baseado no contexto das aulas.
-    """
     topic = request.query
     print(f"🚀 [API] Gerando Quiz sobre: {topic}")
 
-    # 1. Busca contexto
     contexto = buscar_contexto(topic)
 
     if not contexto:
@@ -104,42 +93,62 @@ async def generate_quiz_route(request: QuizRequest):
             "message": "Não encontramos conteúdo suficiente nas aulas para este tema."
         }
 
-    # 2. Prepara prompt
     texto_base = "\n\n".join([f"--- TRECHO DE AULA ---\n{item['content']}" for item in contexto])
 
-    # 3. Chama o Gemini
-    model = genai.GenerativeModel("models/gemini-2.5-flash") # Ajuste o modelo se necessário
+    # CONFIGURAÇÃO JSON PARA O MODELO
+    generation_config = {
+        "temperature": 0.2, # Baixa temperatura para ser mais preciso
+        "response_mime_type": "application/json", # Força resposta JSON nativa do Gemini 1.5
+    }
+
+    model = genai.GenerativeModel("models/gemini-2.5-flash", generation_config=generation_config)
 
     prompt = f"""
-    ATUE COMO UM PROFESSOR DE TECNOLOGIA.
-    Crie um Quiz Técnico curto baseado EXCLUSIVAMENTE no contexto abaixo.
-    
+    Você é um sistema gerador de avaliações técnicas.
+    Analise o contexto abaixo e gere um quiz técnico no formato JSON estrito.
+
     CONTEXTO:
     {texto_base}
-    
+
+    ESTRUTURA DE RESPOSTA OBRIGATÓRIA (JSON):
+    {{
+      "quiz_title": "Título criativo relacionado ao tema",
+      "description": "Uma breve descrição do que será avaliado",
+      "questions": [
+        {{
+          "content": "Enunciado da pergunta aqui?",
+          "options": [
+            {{ "content": "Opção A", "is_correct": false }},
+            {{ "content": "Opção B (correta)", "is_correct": true }},
+            {{ "content": "Opção C", "is_correct": false }},
+            {{ "content": "Opção D", "is_correct": false }},
+            {{ "content": "Opção E", "is_correct": false }}
+          ]
+        }}
+      ]
+    }}
+
     REGRAS:
-    1. Crie 3 perguntas de múltipla escolha.
-    2. Indique a resposta correta.
-    3. Use formatação Markdown clara.
+    1. Crie exatamente 3 perguntas.
+    2. Cada pergunta deve ter 5 alternativas.
+    3. Apenas uma alternativa correta ("is_correct": true) por pergunta.
+    4. Baseie-se APENAS no contexto fornecido.
+    5. NÃO inclua markdown (```json), apenas o objeto JSON puro.
     """
 
     try:
         response = model.generate_content(prompt)
+        print("✅ Quiz JSON gerado!")
         return {
             "success": True,
-            "quiz_content": response.text
+            "quiz_content": response.text # Agora será um JSON válido
         }
     except Exception as e:
         print(f"❌ Erro Gemini: {e}")
         raise HTTPException(status_code=500, detail="Erro interno ao gerar quiz.")
 
-# --- 5. INICIALIZAÇÃO DO SERVIDOR ---
+# --- 5. INICIALIZAÇÃO ---
 if __name__ == "__main__":
-    # Pega a porta do ambiente (padrão Discloud/Heroku/Render) ou usa 8080
     port = int(os.environ.get("PORT", 8080))
-    
     print(f"🚀 Servidor iniciando na porta {port}...")
-    
-    # IMPORTANTE: Passamos o objeto 'app' diretamente, não uma string.
-    # Isso evita erros de "módulo não encontrado" se o nome do arquivo mudar.
     uvicorn.run(app, host="0.0.0.0", port=port)
